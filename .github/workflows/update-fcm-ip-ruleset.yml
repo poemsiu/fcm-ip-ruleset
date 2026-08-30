@@ -1,0 +1,86 @@
+name: Update FCM IP Ruleset
+
+on:
+  schedule:
+    - cron: '0 19 * * *'  # 03:00 China Standard Time (UTC+8)
+  workflow_dispatch:
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+
+      - name: Generate ruleset
+        env:
+          URL: https://raw.githubusercontent.com/cagedbird043/fcm-hosts-next/refs/heads/main/fcm_dual.hosts
+          OUT: fcm_ruleset.json
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, json, urllib.request, ipaddress
+
+          url = os.environ['URL']
+          out = os.environ['OUT']
+
+          try:
+              data = urllib.request.urlopen(url, timeout=30).read().decode('utf-8', errors='ignore')
+          except Exception as e:
+              print('Failed to fetch URL:', e)
+              raise
+
+          # Find candidate tokens that may be IPv4/IPv6 addresses or CIDRs
+          candidates = set(re.findall(r"([0-9A-Fa-f:\.\/]+)", data))
+
+          nets = set()
+          for token in candidates:
+              t = token.strip().strip('[](),;\"\'" )')
+              if not t:
+                  continue
+              # Try as IP address
+              try:
+                  ip = ipaddress.ip_address(t)
+                  if ip.version == 4:
+                      nets.add(str(ip) + '/32')
+                  else:
+                      nets.add(str(ip) + '/128')
+                  continue
+              except Exception:
+                  pass
+              # Try as network (CIDR)
+              try:
+                  net = ipaddress.ip_network(t, strict=False)
+                  nets.add(net.with_prefixlen)
+                  continue
+              except Exception:
+                  pass
+
+          # Final sorted list
+          sorted_list = sorted(nets, key=lambda s: (':' not in s, s))
+
+          ruleset = {
+              "version": 2,
+              "rules": [
+                  {"ip_cidr": sorted_list}
+              ]
+          }
+
+          with open(out, 'w', encoding='utf-8') as f:
+              json.dump(ruleset, f, ensure_ascii=False, indent=2)
+          print(f'Wrote {len(sorted_list)} entries to', out)
+          PY
+
+      - name: Commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add fcm_ruleset.json
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Update fcm_ruleset.json from fcm_dual.hosts"
+            git push
+          fi
